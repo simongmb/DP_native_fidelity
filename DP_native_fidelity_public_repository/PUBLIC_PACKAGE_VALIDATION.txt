@@ -1,0 +1,14 @@
+Public package validation summary
+=================================
+
+Packaging date: 2026-11-24
+
+Checks performed:
+- All 55 R scripts and the 1 Python analysis script are byte-identical to the corresponding scripts in the user-supplied scripts.zip archive.
+- Python script 03_GSE272333_native_fidelity.py passes Python syntax compilation.
+- Local/session artifacts removed: __MACOSX, .DS_Store, .RData, .Rhistory.
+- No scientific thresholds, numerical results, programme memberships, or modelling procedures were intentionally changed during packaging.
+- R scripts were not executed in this packaging environment because R/Rscript was not available; exact historical R package versions were not recoverable from the supplied scripts alone.
+
+Terminology note:
+Some historical internal variables use 'heldout' for the 1,373 non-programme genes after programme exclusion. These variables are preserved for traceability. The donor-blocked cross-validation hold-out unit is the donor.
