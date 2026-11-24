@@ -1,0 +1,1519 @@
+# ============================================================
+# Figure 4E v4
+# Leave-one-gene-out associations with anatomy-referenced state balance
+#
+# PURPOSE
+# ------------------------------------------------------------
+# Identify frozen programme genes that track the Native <->
+# Alternative sample-level balance WITHOUT self-inclusion.
+#
+# Key fix vs v1:
+#   For each tested gene, the balance index is recalculated after
+#   removing that gene from its own program score.
+#
+# This avoids correlating a gene with a composite score that
+# directly contains itself.
+#
+# Gene-level association uses direction-aligned gene z-expression:
+#   restored-up   -> +z
+#   restored-down -> -z
+#
+# Interpretation:
+#   positive rho  = tracks Native-aligned end of the balance
+#   negative rho  = tracks Alternative-aligned end of the balance
+#
+# ============================================================
+
+
+# ------------------------------------------------------------
+# 0. Packages
+# ------------------------------------------------------------
+
+required_pkgs <- c(
+  "readr",
+  "dplyr",
+  "stringr",
+  "tibble",
+  "ggplot2"
+)
+
+missing_pkgs <- required_pkgs[
+  !vapply(
+    required_pkgs,
+    requireNamespace,
+    quietly = TRUE,
+    FUN.VALUE = logical(1)
+  )
+]
+
+if (length(missing_pkgs) > 0) {
+  stop(
+    paste0(
+      "\nMissing packages:\n",
+      paste(missing_pkgs, collapse = ", "),
+      "\n\nInstall with:\n",
+      "install.packages(c(",
+      paste0('"', missing_pkgs, '"', collapse = ", "),
+      "))\n"
+    )
+  )
+}
+
+suppressPackageStartupMessages({
+  library(readr)
+  library(dplyr)
+  library(stringr)
+  library(tibble)
+  library(ggplot2)
+})
+
+
+# ------------------------------------------------------------
+# 1. Locate project root
+# ------------------------------------------------------------
+
+get_script_dir <- function() {
+
+  args <- commandArgs(
+    trailingOnly = FALSE
+  )
+
+  file_arg <- grep(
+    "^--file=",
+    args,
+    value = TRUE
+  )
+
+  if (length(file_arg) > 0) {
+    return(
+      dirname(
+        normalizePath(
+          sub(
+            "^--file=",
+            "",
+            file_arg[1]
+          )
+        )
+      )
+    )
+  }
+
+  getwd()
+}
+
+start_dir <- get_script_dir()
+
+candidate_roots <- unique(
+  c(
+    start_dir,
+    getwd(),
+    dirname(start_dir),
+    dirname(dirname(start_dir)),
+    dirname(getwd()),
+    dirname(dirname(getwd()))
+  )
+)
+
+is_valid_root <- function(x) {
+
+  frozen_dir <- file.path(
+    x,
+    "results",
+    "FROZEN_PROGRAMS"
+  )
+
+  frozen_ok <- all(
+    file.exists(
+      c(
+        file.path(
+          frozen_dir,
+          "Native_identity_restoration_81_FROZEN.csv"
+        ),
+        file.path(
+          frozen_dir,
+          "Alternative_state_rescue_99_FROZEN.csv"
+        )
+      )
+    )
+  )
+
+  audit_ok <- length(
+    list.files(
+      x,
+      pattern = "^02_gene_level_native_fidelity_audit\\.csv$",
+      recursive = TRUE,
+      full.names = TRUE
+    )
+  ) > 0
+
+  frozen_ok && audit_ok
+}
+
+valid_roots <- candidate_roots[
+  vapply(
+    candidate_roots,
+    is_valid_root,
+    logical(1)
+  )
+]
+
+if (length(valid_roots) == 0) {
+  stop("\nCannot identify project root.\n")
+}
+
+project_root <- valid_roots[1]
+
+cat(
+  "\nProject root:\n",
+  project_root,
+  "\n"
+)
+
+
+# ------------------------------------------------------------
+# 2. Load clean-session subexpr
+# ------------------------------------------------------------
+
+loader <- file.path(
+  project_root,
+  "scripts",
+  "load_subexpr_clean.R"
+)
+
+if (!file.exists(loader)) {
+  stop(
+    paste0(
+      "
+Cannot find clean-session loader:
+",
+      loader,
+      "
+"
+    )
+  )
+}
+
+source(loader, local = FALSE)
+
+if (!exists("subexpr", inherits = TRUE)) {
+  stop(
+    "
+QC STOP: load_subexpr_clean.R did not create subexpr.
+"
+  )
+}
+
+expr_mat <- get(
+  "subexpr",
+  inherits = TRUE
+)
+
+if (
+  !is.matrix(expr_mat) &&
+  !is.data.frame(expr_mat)
+) {
+  stop(
+    "
+subexpr must be a matrix/data.frame.
+"
+  )
+}
+
+expr_mat <- as.matrix(
+  expr_mat
+)
+
+storage.mode(expr_mat) <- "numeric"
+
+if (
+  is.null(rownames(expr_mat)) ||
+  is.null(colnames(expr_mat))
+) {
+  stop(
+    "
+subexpr must have gene rownames and sample colnames.
+"
+  )
+}
+
+rownames(expr_mat) <- toupper(
+  stringr::str_trim(
+    rownames(expr_mat)
+  )
+)
+
+if (nrow(expr_mat) != 1553L) {
+  stop(
+    paste0(
+      "
+QC STOP: expected 1553 genes in clean-session subexpr, found ",
+      nrow(expr_mat),
+      ".
+"
+    )
+  )
+}
+
+if (ncol(expr_mat) != 110L) {
+  stop(
+    paste0(
+      "
+QC STOP: expected 110 profiles in clean-session subexpr, found ",
+      ncol(expr_mat),
+      ".
+"
+    )
+  )
+}
+
+sample_ids <- colnames(
+  expr_mat
+)
+
+cat(
+  "
+Clean-session subexpr dimensions:",
+  nrow(expr_mat),
+  "x",
+  ncol(expr_mat),
+  "
+"
+)
+
+
+# ------------------------------------------------------------
+# 3. Helpers
+# ------------------------------------------------------------
+
+clean_gene <- function(x) {
+
+  x <- toupper(
+    stringr::str_trim(
+      as.character(x)
+    )
+  )
+
+  x[x == ""] <- NA_character_
+
+  unique(
+    x[
+      !is.na(x)
+    ]
+  )
+}
+
+read_frozen <- function(path) {
+
+  x <- readr::read_csv(
+    path,
+    show_col_types = FALSE
+  )
+
+  if (!"GeneSymbol" %in% names(x)) {
+    stop(
+      paste0(
+        "\nGeneSymbol missing in:\n",
+        path,
+        "\n"
+      )
+    )
+  }
+
+  clean_gene(
+    x$GeneSymbol
+  )
+}
+
+pick_col <- function(
+  df,
+  candidates
+) {
+
+  hit <- candidates[
+    candidates %in%
+      names(df)
+  ]
+
+  if (length(hit) == 0) {
+    return(
+      NA_character_
+    )
+  }
+
+  hit[1]
+}
+
+
+# ------------------------------------------------------------
+# 4. Frozen programmes
+# ------------------------------------------------------------
+
+frozen_dir <- file.path(
+  project_root,
+  "results",
+  "FROZEN_PROGRAMS"
+)
+
+native81 <- read_frozen(
+  file.path(
+    frozen_dir,
+    "Native_identity_restoration_81_FROZEN.csv"
+  )
+)
+
+alternative99 <- read_frozen(
+  file.path(
+    frozen_dir,
+    "Alternative_state_rescue_99_FROZEN.csv"
+  )
+)
+
+if (length(native81) != 81) {
+  stop("\nNative frozen program != 81 genes.\n")
+}
+
+if (length(alternative99) != 99) {
+  stop("\nAlternative frozen program != 99 genes.\n")
+}
+
+if (
+  !all(
+    native81 %in%
+      rownames(expr_mat)
+  )
+) {
+  stop(
+    "\nsubexpr does not contain all 81 native genes.\n"
+  )
+}
+
+if (
+  !all(
+    alternative99 %in%
+      rownames(expr_mat)
+  )
+) {
+  stop(
+    "\nsubexpr does not contain all 99 alternative genes.\n"
+  )
+}
+
+
+# ------------------------------------------------------------
+# 5. Audit + direction
+# ------------------------------------------------------------
+
+audit_files <- list.files(
+  project_root,
+  pattern = "^02_gene_level_native_fidelity_audit\\.csv$",
+  recursive = TRUE,
+  full.names = TRUE
+)
+
+if (length(audit_files) == 0) {
+  stop(
+    "\nCannot find 02_gene_level_native_fidelity_audit.csv\n"
+  )
+}
+
+if (length(audit_files) > 1) {
+
+  in_results <- grepl(
+    "results",
+    audit_files,
+    ignore.case = TRUE
+  )
+
+  if (any(in_results)) {
+    audit_files <- audit_files[
+      in_results
+    ]
+  }
+}
+
+audit_file <- audit_files[1]
+
+audit0 <- readr::read_csv(
+  audit_file,
+  show_col_types = FALSE
+)
+
+gene_col <- pick_col(
+  audit0,
+  c(
+    "GeneSymbol",
+    "gene_symbol",
+    "Gene",
+    "gene",
+    "symbol",
+    "SYMBOL"
+  )
+)
+
+if (is.na(gene_col)) {
+  stop(
+    "\nCannot identify gene column in audit table.\n"
+  )
+}
+
+direction_candidates <- c(
+  "restoration_direction",
+  "Restoration_direction",
+  "restored_direction",
+  "Restored_direction",
+  "rescue_direction",
+  "Rescue_direction",
+  "strict_rescue_direction",
+  "Strict_rescue_direction",
+  "direction_restored",
+  "restored_up_down",
+  "Restored_up_down",
+  "rescue_up_down",
+  "direction"
+)
+
+up_flag_candidates <- c(
+  "restored_up",
+  "Restored_up",
+  "is_restored_up",
+  "is_restored_upward",
+  "restored_upward"
+)
+
+signed_effect_candidates <- c(
+  "rescue_logFC",
+  "Rescue_logFC",
+  "rescue_effect",
+  "Rescue_effect",
+  "restoration_logFC",
+  "Restoration_logFC",
+  "treatment_logFC",
+  "Treatment_logFC",
+  "perturbation_logFC"
+)
+
+direction_col <- pick_col(
+  audit0,
+  direction_candidates
+)
+
+up_flag_col <- pick_col(
+  audit0,
+  up_flag_candidates
+)
+
+signed_effect_col <- pick_col(
+  audit0,
+  signed_effect_candidates
+)
+
+direction_sign <- rep(
+  NA_real_,
+  nrow(audit0)
+)
+
+direction_source <- NA_character_
+
+
+if (!is.na(direction_col)) {
+
+  raw_dir <- tolower(
+    stringr::str_trim(
+      as.character(
+        audit0[[direction_col]]
+      )
+    )
+  )
+
+  direction_sign[
+    grepl(
+      "up|upward|increase|positive|\\+1",
+      raw_dir
+    )
+  ] <- 1
+
+  direction_sign[
+    grepl(
+      "down|downward|decrease|negative|-1",
+      raw_dir
+    )
+  ] <- -1
+
+  direction_source <- paste0(
+    "categorical column: ",
+    direction_col
+  )
+}
+
+if (
+  all(is.na(direction_sign)) &&
+  !is.na(up_flag_col)
+) {
+
+  flag <- audit0[[up_flag_col]]
+
+  if (is.logical(flag)) {
+
+    direction_sign <- ifelse(
+      flag,
+      1,
+      -1
+    )
+
+    direction_source <- paste0(
+      "logical column: ",
+      up_flag_col
+    )
+  }
+}
+
+if (
+  all(is.na(direction_sign)) &&
+  !is.na(signed_effect_col)
+) {
+
+  effect <- suppressWarnings(
+    as.numeric(
+      audit0[[signed_effect_col]]
+    )
+  )
+
+  direction_sign <- sign(
+    effect
+  )
+
+  direction_sign[
+    !is.finite(direction_sign) |
+    direction_sign == 0
+  ] <- NA_real_
+
+  direction_source <- paste0(
+    "signed numeric column: ",
+    signed_effect_col
+  )
+}
+
+if (all(is.na(direction_sign))) {
+  stop(
+    "\nCannot recover restored-up/restored-down direction.\n"
+  )
+}
+
+direction_tbl <- tibble::tibble(
+
+  GeneSymbol =
+    toupper(
+      stringr::str_trim(
+        as.character(
+          audit0[[gene_col]]
+        )
+      )
+    ),
+
+  Direction_sign =
+    direction_sign
+) %>%
+
+  dplyr::filter(
+    !is.na(GeneSymbol),
+    is.finite(Direction_sign),
+    Direction_sign %in%
+      c(-1, 1)
+  ) %>%
+
+  dplyr::distinct(
+    GeneSymbol,
+    .keep_all = TRUE
+  )
+
+
+# ------------------------------------------------------------
+# 6. Frozen direction QC
+# ------------------------------------------------------------
+
+native_direction <- tibble::tibble(
+  GeneSymbol =
+    native81
+) %>%
+  dplyr::left_join(
+    direction_tbl,
+    by = "GeneSymbol"
+  )
+
+alt_direction <- tibble::tibble(
+  GeneSymbol =
+    alternative99
+) %>%
+  dplyr::left_join(
+    direction_tbl,
+    by = "GeneSymbol"
+  )
+
+if (
+  any(!is.finite(native_direction$Direction_sign)) ||
+  any(!is.finite(alt_direction$Direction_sign))
+) {
+  stop(
+    "\nDirection missing for frozen genes.\n"
+  )
+}
+
+native_up <- sum(
+  native_direction$Direction_sign == 1
+)
+
+native_down <- sum(
+  native_direction$Direction_sign == -1
+)
+
+alt_up <- sum(
+  alt_direction$Direction_sign == 1
+)
+
+alt_down <- sum(
+  alt_direction$Direction_sign == -1
+)
+
+if (
+  native_up != 55 ||
+  native_down != 26 ||
+  alt_up != 30 ||
+  alt_down != 69
+) {
+  stop(
+    "\nDirection QC does not reproduce frozen Figure 3D counts.\n"
+  )
+}
+
+
+# ------------------------------------------------------------
+# 7. Gene-wise z scoring + direction alignment
+# ------------------------------------------------------------
+
+z_by_gene <- function(mat) {
+
+  z <- t(
+    apply(
+      mat,
+      1,
+      function(v) {
+
+        s <- stats::sd(
+          v,
+          na.rm = TRUE
+        )
+
+        if (
+          !is.finite(s) ||
+          s == 0
+        ) {
+          return(
+            rep(
+              0,
+              length(v)
+            )
+          )
+        }
+
+        (
+          v -
+          mean(
+            v,
+            na.rm = TRUE
+          )
+        ) / s
+      }
+    )
+  )
+
+  rownames(z) <- rownames(mat)
+  colnames(z) <- colnames(mat)
+
+  z
+}
+
+
+native_z <- z_by_gene(
+  expr_mat[
+    native81,
+    ,
+    drop = FALSE
+  ]
+)
+
+alt_z <- z_by_gene(
+  expr_mat[
+    alternative99,
+    ,
+    drop = FALSE
+  ]
+)
+
+
+native_sign <- native_direction$Direction_sign[
+  match(
+    native81,
+    native_direction$GeneSymbol
+  )
+]
+
+alt_sign <- alt_direction$Direction_sign[
+  match(
+    alternative99,
+    alt_direction$GeneSymbol
+  )
+]
+
+
+native_aligned <- sweep(
+  native_z,
+  1,
+  native_sign,
+  "*"
+)
+
+alt_aligned <- sweep(
+  alt_z,
+  1,
+  alt_sign,
+  "*"
+)
+
+
+# ------------------------------------------------------------
+# 8. Full-program scores
+# ------------------------------------------------------------
+
+native_full <- colMeans(
+  native_aligned,
+  na.rm = TRUE
+)
+
+alt_full <- colMeans(
+  alt_aligned,
+  na.rm = TRUE
+)
+
+sample_ids <- colnames(
+  expr_mat
+)
+
+
+# ------------------------------------------------------------
+# 9. Leave-one-gene-out driver analysis
+# ------------------------------------------------------------
+
+driver_rows <- list()
+
+idx <- 1
+
+
+# Native-aligned programme genes
+for (g in native81) {
+
+  native_loo_genes <- setdiff(
+    native81,
+    g
+  )
+
+  native_loo_score <- colMeans(
+    native_aligned[
+      native_loo_genes,
+      ,
+      drop = FALSE
+    ],
+    na.rm = TRUE
+  )
+
+  balance_loo <- native_loo_score -
+    alt_full
+
+  gene_aligned <- as.numeric(
+    native_aligned[
+      g,
+      sample_ids
+    ]
+  )
+
+  ct <- suppressWarnings(
+    stats::cor.test(
+      gene_aligned,
+      balance_loo,
+      method = "spearman",
+      exact = FALSE
+    )
+  )
+
+  driver_rows[[idx]] <- tibble::tibble(
+    GeneSymbol = g,
+    Program = "Native-aligned programme",
+    Spearman_rho = unname(
+      ct$estimate
+    ),
+    P_value = ct$p.value
+  )
+
+  idx <- idx + 1
+}
+
+
+# Alternative-state programme genes
+for (g in alternative99) {
+
+  alt_loo_genes <- setdiff(
+    alternative99,
+    g
+  )
+
+  alt_loo_score <- colMeans(
+    alt_aligned[
+      alt_loo_genes,
+      ,
+      drop = FALSE
+    ],
+    na.rm = TRUE
+  )
+
+  balance_loo <- native_full -
+    alt_loo_score
+
+  gene_aligned <- as.numeric(
+    alt_aligned[
+      g,
+      sample_ids
+    ]
+  )
+
+  ct <- suppressWarnings(
+    stats::cor.test(
+      gene_aligned,
+      balance_loo,
+      method = "spearman",
+      exact = FALSE
+    )
+  )
+
+  driver_rows[[idx]] <- tibble::tibble(
+    GeneSymbol = g,
+    Program = "Alternative-state programme",
+    Spearman_rho = unname(
+      ct$estimate
+    ),
+    P_value = ct$p.value
+  )
+
+  idx <- idx + 1
+}
+
+
+drivers <- dplyr::bind_rows(
+  driver_rows
+) %>%
+
+  dplyr::mutate(
+
+    FDR =
+      p.adjust(
+        P_value,
+        method = "BH"
+      ),
+
+    Axis_end =
+      dplyr::case_when(
+        Spearman_rho > 0 ~
+          "Native-aligned end",
+        Spearman_rho < 0 ~
+          "Alternative-aligned end",
+        TRUE ~
+          "Neutral"
+      )
+  ) %>%
+
+  dplyr::arrange(
+    Spearman_rho
+  )
+
+
+# ------------------------------------------------------------
+# 10. Select strongest positive / negative drivers
+# ------------------------------------------------------------
+
+TOP_N <- 8
+
+top_negative <- drivers %>%
+
+  dplyr::arrange(
+    Spearman_rho
+  ) %>%
+
+  dplyr::slice_head(
+    n = TOP_N
+  )
+
+top_positive <- drivers %>%
+
+  dplyr::arrange(
+    dplyr::desc(
+      Spearman_rho
+    )
+  ) %>%
+
+  dplyr::slice_head(
+    n = TOP_N
+  )
+
+plot_df <- dplyr::bind_rows(
+  top_negative,
+  top_positive
+) %>%
+
+  dplyr::distinct(
+    GeneSymbol,
+    .keep_all = TRUE
+  ) %>%
+
+  dplyr::arrange(
+    Spearman_rho
+  ) %>%
+
+  dplyr::mutate(
+    Gene_plot =
+      factor(
+        GeneSymbol,
+        levels =
+          GeneSymbol
+      )
+  )
+
+
+# ------------------------------------------------------------
+# 11. Summary
+# ------------------------------------------------------------
+
+n_fdr <- sum(
+  drivers$FDR < 0.05,
+  na.rm = TRUE
+)
+
+n_positive <- sum(
+  drivers$FDR < 0.05 &
+  drivers$Spearman_rho > 0,
+  na.rm = TRUE
+)
+
+n_negative <- sum(
+  drivers$FDR < 0.05 &
+  drivers$Spearman_rho < 0,
+  na.rm = TRUE
+)
+
+cat(
+  "\nLeave-one-gene-out driver summary:\n",
+  "Genes tested = ",
+  nrow(drivers),
+  "\n",
+  "FDR < 0.05 = ",
+  n_fdr,
+  "\n",
+  "Positive = ",
+  n_positive,
+  "\n",
+  "Negative = ",
+  n_negative,
+  "\n",
+  sep = ""
+)
+
+
+# ------------------------------------------------------------
+# 12. Plot — swapped axes, wide / short layout
+# ------------------------------------------------------------
+
+COL_NATIVE <- "#3D8C82"
+COL_ALT <- "#C97857"
+COL_TEXT <- "#20343D"
+COL_MUTED <- "#718993"
+COL_ZERO <- "#A8B5BA"
+
+program_cols <- c(
+  "Native-aligned programme" = COL_NATIVE,
+  "Alternative-state programme" = COL_ALT
+)
+
+# Keep the original signed-rho ordering from negative to positive.
+plot_df <- plot_df %>%
+  dplyr::arrange(Spearman_rho) %>%
+  dplyr::mutate(
+    Gene_plot = factor(
+      GeneSymbol,
+      levels = GeneSymbol
+    )
+  )
+
+p <- ggplot(
+  plot_df,
+  aes(
+    x = Gene_plot,
+    y = Spearman_rho,
+    colour = Program
+  )
+) +
+
+  geom_hline(
+    yintercept = 0,
+    linewidth = 0.30,
+    colour = COL_ZERO
+  ) +
+
+  geom_segment(
+    aes(
+      xend = Gene_plot,
+      y = 0,
+      yend = Spearman_rho
+    ),
+    linewidth = 0.55,
+    alpha = 0.78
+  ) +
+
+  geom_point(
+    aes(
+      size = -log10(
+        FDR + 1e-300
+      )
+    ),
+    alpha = 0.95
+  ) +
+
+  scale_colour_manual(
+    values = program_cols,
+    name = NULL
+  ) +
+
+  scale_size_continuous(
+    range = c(
+      1.7,
+      3.2
+    ),
+    name =
+      expression(
+        -log[10]("FDR")
+      )
+  ) +
+
+  scale_y_continuous(
+    breaks = c(
+      -0.5,
+      0,
+      0.5
+    ),
+    expand = expansion(
+      mult = c(
+        0.08,
+        0.10
+      )
+    )
+  ) +
+
+  labs(
+    x = NULL,
+    y = "Leave-one-out Spearman rho",
+    title = "Programme genes track opposite ends of the state balance",
+    subtitle = paste0(
+      "Top ",
+      TOP_N,
+      " negative and ",
+      TOP_N,
+      " positive leave-one-gene-out associations"
+    ),
+    caption = paste0(
+      "n = ",
+      length(sample_ids),
+      " samples; direction-aligned expression; FDR BH-adjusted across 180 genes."
+    )
+  ) +
+
+  theme_classic(
+    base_family = "Helvetica",
+    base_size = 7
+  ) +
+
+  theme(
+    plot.title = element_text(
+      size = 5.3,
+      face = "bold",
+      colour = COL_TEXT,
+      hjust = 0.5,
+      margin = margin(
+        b = 0.8
+      )
+    ),
+
+    plot.subtitle = element_text(
+      size = 4.3,
+      colour = COL_MUTED,
+      hjust = 0.5,
+      margin = margin(
+        b = 2.0
+      )
+    ),
+
+    plot.caption = element_text(
+      size = 4.1,
+      colour = "#95A4AA",
+      hjust = 0.5,
+      margin = margin(
+        t = 2.5
+      )
+    ),
+
+    axis.title.y = element_text(
+      size = 5.0,
+      colour = COL_TEXT,
+      margin = margin(
+        r = 3
+      )
+    ),
+
+    axis.text.y = element_text(
+      size = 4.6,
+      colour = COL_MUTED
+    ),
+
+    axis.text.x = element_text(
+      size = 4.5,
+      colour = COL_TEXT,
+      angle = 55,
+      hjust = 1,
+      vjust = 1
+    ),
+
+    axis.line = element_line(
+      linewidth = 0.30,
+      colour = COL_TEXT
+    ),
+
+    axis.ticks = element_line(
+      linewidth = 0.26,
+      colour = COL_TEXT
+    ),
+
+    axis.ticks.length = unit(
+      1.0,
+      "mm"
+    ),
+
+    legend.position = "right",
+
+    legend.title = element_text(
+      size = 4.6,
+      colour = COL_TEXT
+    ),
+
+    legend.text = element_text(
+      size = 4.4,
+      colour = COL_MUTED
+    ),
+
+    legend.key.height = unit(
+      2.7,
+      "mm"
+    ),
+
+    legend.key.width = unit(
+      3.0,
+      "mm"
+    ),
+
+    plot.margin = margin(
+      4,
+      6,
+      4,
+      6,
+      unit = "pt"
+    )
+  )
+
+
+# ------------------------------------------------------------
+# 13. Output
+# ------------------------------------------------------------
+
+out_dir <- file.path(
+  project_root,
+  "figures",
+  "FIGURE 4",
+  "Panel_E_driverGenes_stateBalance_v4"
+)
+
+dir.create(
+  out_dir,
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+
+ggsave(
+  filename = file.path(
+    out_dir,
+    "Fig4_PanelE_driverGenes_stateBalance_v4.png"
+  ),
+  plot = p,
+  width = 88,
+  height = 46,
+  units = "mm",
+  dpi = 600,
+  bg = "white"
+)
+
+
+pdf(
+  file = file.path(
+    out_dir,
+    "Fig4_PanelE_driverGenes_stateBalance_v4.pdf"
+  ),
+  width = 88 / 25.4,
+  height = 46 / 25.4,
+  family = "Helvetica",
+  useDingbats = FALSE
+)
+
+print(
+  p
+)
+
+dev.off()
+
+
+ggsave(
+  filename = file.path(
+    out_dir,
+    "Fig4_PanelE_driverGenes_stateBalance_v4.tiff"
+  ),
+  plot = p,
+  width = 88,
+  height = 46,
+  units = "mm",
+  dpi = 600,
+  compression = "lzw",
+  bg = "white"
+)
+
+
+readr::write_csv(
+  drivers,
+  file.path(
+    out_dir,
+    "Fig4E_LOO_all_gene_associations.csv"
+  )
+)
+
+
+readr::write_csv(
+  plot_df,
+  file.path(
+    out_dir,
+    "Fig4E_LOO_plot_data.csv"
+  )
+)
+
+
+stats_df <- tibble::tibble(
+
+  Metric = c(
+    "Samples",
+    "Frozen genes tested",
+    "FDR significant genes",
+    "FDR significant positive associations",
+    "FDR significant negative associations"
+  ),
+
+  Value = c(
+    length(
+      sample_ids
+    ),
+    nrow(
+      drivers
+    ),
+    n_fdr,
+    n_positive,
+    n_negative
+  )
+)
+
+readr::write_csv(
+  stats_df,
+  file.path(
+    out_dir,
+    "Fig4E_LOO_statistics.csv"
+  )
+)
+
+
+qc_df <- tibble::tibble(
+
+  Item = c(
+    "subexpr genes",
+    "subexpr samples",
+    "Native frozen genes",
+    "Alternative frozen genes",
+    "Native restored-up",
+    "Native restored-down",
+    "Alternative restored-up",
+    "Alternative restored-down"
+  ),
+
+  Value = c(
+    nrow(
+      expr_mat
+    ),
+    ncol(
+      expr_mat
+    ),
+    length(
+      native81
+    ),
+    length(
+      alternative99
+    ),
+    native_up,
+    native_down,
+    alt_up,
+    alt_down
+  ),
+
+  Expected = c(
+    "1553",
+    "110",
+    "81",
+    "99",
+    "55",
+    "26",
+    "30",
+    "69"
+  )
+)
+
+readr::write_csv(
+  qc_df,
+  file.path(
+    out_dir,
+    "Fig4E_LOO_QC.csv"
+  )
+)
+
+
+readme <- c(
+
+  "Figure 4E leave-one-gene-out association analysis v4",
+
+  "",
+
+  "Purpose:",
+  "Identify frozen programme genes that track the anatomy-referenced state balance without self-inclusion.",
+
+  "",
+
+  "Method:",
+  "For each gene, remove that gene from its own programme score before calculating Native-aligned - Alternative-state balance.",
+  "Then correlate direction-aligned gene z-expression with that leave-one-out balance using Spearman correlation.",
+
+  "",
+
+  "Important:",
+  "This removes direct self-correlation but remains an association analysis; it does not establish causality.",
+
+  "",
+
+  paste0(
+    "Samples = ",
+    length(
+      sample_ids
+    )
+  ),
+
+  paste0(
+    "Genes tested = ",
+    nrow(
+      drivers
+    )
+  ),
+
+  paste0(
+    "FDR significant genes = ",
+    n_fdr
+  ),
+
+  paste0(
+    "Positive associations = ",
+    n_positive
+  ),
+
+  paste0(
+    "Negative associations = ",
+    n_negative
+  ),
+
+  "",
+
+  paste0(
+    "Direction source: ",
+    direction_source
+  )
+)
+
+writeLines(
+  readme,
+  file.path(
+    out_dir,
+    "README_Fig4E_driverGenes_stateBalance_v4.txt"
+  )
+)
+
+
+cat(
+  "\n============================================\n",
+  "FIGURE 4E v4 COMPLETE\n",
+  "============================================\n\n",
+  sep = ""
+)
+
+print(
+  stats_df,
+  n = Inf
+)
+
+cat(
+  "\nTop negative associations:\n"
+)
+
+print(
+  top_negative %>%
+    dplyr::select(
+      GeneSymbol,
+      Program,
+      Spearman_rho,
+      FDR
+    ),
+  n = Inf
+)
+
+cat(
+  "\nTop positive associations:\n"
+)
+
+print(
+  top_positive %>%
+    dplyr::select(
+      GeneSymbol,
+      Program,
+      Spearman_rho,
+      FDR
+    ),
+  n = Inf
+)
+
+cat(
+  "\nOutput directory:\n",
+  out_dir,
+  "\n"
+)
