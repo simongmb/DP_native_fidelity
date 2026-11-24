@@ -9,27 +9,12 @@ authors:
     given-names: "Chenggang"
   - family-names: "Fan"
     given-names: "Ruyi"
-version: "1.0.0"
+version: "1.0.2"
 date-released: "2026-11-24"
-repository-code: "REPLACE_WITH_GITHUB_OR_PUBLIC_REPOSITORY_URL"
-doi: "REPLACE_WITH_ZENODO_DOI"
-license: "LicenseRef-Permission-Required-Academic"
+repository-code: "https://github.com/simongmb/DP_native_fidelity"
 abstract: >-
   Reproducible analysis code and supporting workflows for anatomy-referenced
   transcriptomic benchmarking of human dermal papilla cell-state recovery,
   including strict-rescue analysis, native-fidelity scoring, programme
   definition, sensitivity analyses, donor-aware association testing,
   donor-blocked nested cross-validation, and figure generation.
-preferred-citation:
-  type: article
-  title: "Anatomy-referenced transcriptomics separates molecular reversal from native identity restoration in human dermal papilla cells"
-  authors:
-    - family-names: "Gu"
-      given-names: "Mingbao"
-    - family-names: "Yi"
-      given-names: "Chenggang"
-    - family-names: "Fan"
-      given-names: "Ruyi"
-  journal: "Genomics, Proteomics & Bioinformatics"
-  year: "2026"
-  doi: "REPLACE_WITH_ARTICLE_DOI_WHEN_AVAILABLE"
